@@ -1,0 +1,133 @@
+#!/bin/env python3
+
+from getpass import getpass, getuser
+import winrm
+from base64 import b64encode
+import fire
+import os
+
+class Session(winrm.Session):
+    def run_ps(self, script: str) -> winrm.Response: #override
+        """base64 encodes a Powershell script and executes the powershell
+        encoded script command.
+
+        """
+        # Suppress progress bar
+        script = "$ProgressPreference = 'SilentlyContinue';" + script
+        # must use utf16 little endian on windows
+        encoded_ps = b64encode(script.encode("utf_16_le")).decode("ascii")
+        rs = self.run_cmd("powershell -encodedcommand {0}".format(encoded_ps))
+        if len(rs.std_err):
+            # if there was an error message, clean it it up and make it human
+            # readable
+            rs.std_err = self._clean_error_msg(rs.std_err)
+        return rs
+
+def _print_result(response: winrm.Response):
+    print(response.std_out.decode('cp932'))
+    if response.status_code != 0:
+        print(response.std_err.decode('cp932'))
+
+connection_info = {
+    "user": "",
+    "password": "",
+    "computer": "",
+}
+
+def _run_ps(script: str) -> winrm.Response:
+    s = Session(connection_info["computer"], auth=(connection_info["user"], connection_info["password"]), transport='ntlm')
+    return s.run_ps(script)
+
+def _need_password():
+    if not connection_info["password"]:
+        connection_info["password"] = getpass("Authenticating as {user}: ".format(user=connection_info["user"]))
+
+class Cli(object):
+
+    def __init__(self, user=None, password=None, computer="localhost"):
+        self.vm = Vm()
+        if not user:
+            connection_info["user"] = getuser()
+        connection_info["password"] = password
+        connection_info["computer"] = computer
+
+class Vm(object):
+
+    def list_vms(self):
+        ps_script = '''$vms = @{};
+                       $vms.add("vms", $(Get-VM | Select Name, VMId));
+                       $vms | ConvertTo-Json'''
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def describe_vm(self, vm_name=None, vm_id=None):
+        if vm_name:
+            ps_script = '''Get-VM -Name "{vm_name}" | Select * | ConvertTo-Json'''.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script = '''Get-VM -Id "{vm_id}"| Select * | ConvertTo-Json'''.format(vm_id=vm_id)
+        else:
+            raise Exception("Neither vm_name nor vm_id specified")
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def stop_vm(self, vm_name=None, vm_id=None, force=False, skip_os_shutdown=False):
+        if vm_name:
+            ps_script = '''Stop-VM -Name "{vm_name}"'''.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script = '''Get-VM -Id "{vm_id}" | Stop-VM '''.format(vm_id=vm_id)
+        else:
+            raise Exception("Neither vm_name nor vm_id specified")
+
+        if skip_os_shutdown:
+            ps_script += ' -TurnOff'
+        elif force:
+            ps_script += ' -Force'
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def save_vm(self, vm_name=None, vm_id=None):
+        if vm_name:
+            ps_script = '''Stop-VM -Name "{vm_name}" -Save'''.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script = '''Get-VM -Id "{vm_id}" | Stop-VM -Save'''.format(vm_id=vm_id)
+        else:
+            raise Exception("Neither vm_name nor vm_id specified")
+
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def start_vm(self, vm_name=None, vm_id=None):
+        if vm_name:
+            ps_script = '''Start-VM -Name "{vm_name}"'''.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script = '''Get-VM -Id "{vm_id}" | Start-VM '''.format(vm_id=vm_id)
+        else:
+            raise Exception("Neither vm_name nor vm_id specified")
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def get_vm_status(self, vm_name=None, vm_id=None):
+        if vm_name:
+            ps_script = '$ConvertStateToString=@{Label="StateName"; Expression={[String]$_.State}}; ' + \
+                        'Get-VM -Name "{vm_name}"'.format(vm_name=vm_name) + \
+                        '| Select VMName, VMId, State, $ConvertStateToString, PrimaryStatusDescription' + \
+                        '| ConvertTo-Json'
+
+        elif vm_id:
+            ps_script = '$ConvertStateToString=@{Label="StateName"; Expression={[String]$_.State}}; ' + \
+                        'Get-VM -Id "{vm_id}"'.format(vm_id=vm_id) + \
+                        '| Select VMName, VMId, State, $ConvertStateToString, PrimaryStatusDescription' + \
+                        '| ConvertTo-Json'
+        else:
+            raise Exception("Neither vm_name nor vm_id specified")
+        _need_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+if __name__ == "__main__":
+    fire.Fire(Cli)
