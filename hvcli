@@ -32,24 +32,44 @@ connection_info = {
     "user": "",
     "password": "",
     "computer": "",
+    "auth_methods": [],
 }
 
 def _run_ps(script: str) -> winrm.Response:
-    s = Session(connection_info["computer"], auth=(connection_info["user"], connection_info["password"]), transport='ntlm')
-    return s.run_ps(script)
+    response = None
+    for auth_method in connection_info["auth_methods"]:
+        print("Trying auth method: {}".format(auth_method))
+        session = Session(connection_info["computer"],
+                    auth=(connection_info["user"], connection_info["password"]),
+                    transport=auth_method)
+        try:
+            response = session.run_ps(script)
+        except Exception as e:
+            print("Failed.")
+    if response is None:
+        print("All specified authentication failed.")
+        exit(1)
+    return response
 
-def _need_password():
+def _acquire_password():
     if not connection_info["password"]:
-        connection_info["password"] = getpass("Authenticating as {user}: ".format(user=connection_info["user"]))
+        try:
+            connection_info["password"] = getpass("Authenticating as {user}: ".format(user=connection_info["user"]))
+        except KeyboardInterrupt:
+            print("Aborted.")
+            exit(1)
 
 class Cli(object):
 
-    def __init__(self, user=None, password=None, computer="localhost"):
+    def __init__(self, user=None, password=None, computer="localhost", auth_methods=('ntlm', 'kerberos')):
         self.vm = Vm()
         if not user:
             connection_info["user"] = getuser()
         connection_info["password"] = password
         connection_info["computer"] = computer
+        if type(auth_methods) != tuple:
+            auth_methods = (auth_methods,)
+        connection_info["auth_methods"] = auth_methods
 
 class Vm(object):
 
@@ -57,7 +77,7 @@ class Vm(object):
         ps_script = '''$vms = @{};
                        $vms.add("vms", $(Get-VM | Select Name, VMId));
                        $vms | ConvertTo-Json'''
-        _need_password()
+        _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
@@ -67,36 +87,29 @@ class Vm(object):
         elif vm_id:
             ps_script = '''Get-VM -Id "{vm_id}"| Select * | ConvertTo-Json'''.format(vm_id=vm_id)
         else:
-            raise Exception("Neither vm_name nor vm_id specified")
-        _need_password()
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
-    def stop_vm(self, vm_name=None, vm_id=None, force=False, skip_os_shutdown=False):
+    def stop_vm(self, vm_name=None, vm_id=None, force=False, skip_os_shutdown=False, save=False):
         if vm_name:
             ps_script = '''Stop-VM -Name "{vm_name}"'''.format(vm_name=vm_name)
         elif vm_id:
             ps_script = '''Get-VM -Id "{vm_id}" | Stop-VM '''.format(vm_id=vm_id)
         else:
-            raise Exception("Neither vm_name nor vm_id specified")
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        if sum(opt is not False for opt in [force, skip_os_shutdown, save]) > 1:
+            raise fire.core.FireError("Too many options. You can specify only one of following: --force, --skip-os-shutdown, --save")
 
         if skip_os_shutdown:
             ps_script += ' -TurnOff'
         elif force:
             ps_script += ' -Force'
-        _need_password()
-        ret = _run_ps(ps_script)
-        _print_result(ret)
+        elif save:
+            ps_script += ' -Save'
 
-    def save_vm(self, vm_name=None, vm_id=None):
-        if vm_name:
-            ps_script = '''Stop-VM -Name "{vm_name}" -Save'''.format(vm_name=vm_name)
-        elif vm_id:
-            ps_script = '''Get-VM -Id "{vm_id}" | Stop-VM -Save'''.format(vm_id=vm_id)
-        else:
-            raise Exception("Neither vm_name nor vm_id specified")
-
-        _need_password()
+        _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
@@ -106,8 +119,8 @@ class Vm(object):
         elif vm_id:
             ps_script = '''Get-VM -Id "{vm_id}" | Start-VM '''.format(vm_id=vm_id)
         else:
-            raise Exception("Neither vm_name nor vm_id specified")
-        _need_password()
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
@@ -124,8 +137,8 @@ class Vm(object):
                         '| Select VMName, VMId, State, $ConvertStateToString, PrimaryStatusDescription' + \
                         '| ConvertTo-Json'
         else:
-            raise Exception("Neither vm_name nor vm_id specified")
-        _need_password()
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
