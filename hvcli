@@ -35,8 +35,9 @@ def _run_ps(script: str) -> winrm.Response:
 
 def _acquire_password():
     if not connection_info["password"]:
+        print("Authenticating as {user}.".format(user=connection_info["user"]))
         try:
-            connection_info["password"] = getpass("Authenticating as {user}: ".format(user=connection_info["user"]))
+            connection_info["password"] = getpass("Password: ")
         except KeyboardInterrupt:
             print("Aborted.")
             exit(130)
@@ -45,6 +46,7 @@ class Cli(object):
 
     def __init__(self, user=None, password=None, computer="localhost", auth_methods=('ntlm', 'kerberos')):
         self.vm = Vm()
+        self.network_adapter = NetworkAdapter()
         if not user:
             connection_info["user"] = getuser()
         connection_info["password"] = password
@@ -212,6 +214,58 @@ class Vm(object):
         ret = _run_ps(ps_script)
         _print_result(ret)
 
+    def rename_vm(self, vm_name=None, vm_id=None, new_name=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Rename-VM -vm_name "{vm_name}" -newname {new_name}'.format(vm_name=vm_name, new_name=new_name)
+        elif vm_id:
+            ps_script += 'hvcli-Rename-VM -vm_id "{vm_id}" -newname {new_name}'.format(vm_id=vm_id, new_name=new_name)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        if not new_name:
+            raise fire.core.FireError("--new-name is required.")
+
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+class NetworkAdapter(object):
+
+    def __init__(self):
+        f = open('ps1/networkadapter.ps1')
+        self.loaded_script = f.read()
+        f.close()
+
+    def list_network_adapters(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-List-VM-NetworkAdapters -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-List-VM-NetworkAdapters -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def describe_network_adapter(self, vm_name=None, vm_id=None, mac_address=None ):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Describe-VM-NetworkAdapter -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-Describe-VM-NetworkAdapter -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+
+        if mac_address:
+            ps_script += '-MacAddress "{}"'.format(mac_address)
+        else:
+            raise fire.core.FireError("MAC address is required.")
+
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
 
 if __name__ == "__main__":
     fire.Fire(Cli)

@@ -1,5 +1,5 @@
 $ProgressPreference = 'SilentlyContinue'
-chcp 65001
+chcp 65001 # Do not redirect to Out-Object, otherwise, chcp won't work. (Why?)
 
 function hvcli-List-VMs(){
     Get-VM | Select Name, VMId | ConvertTo-Json
@@ -76,6 +76,7 @@ function hvcli-Reboot-VM([string]$vm_name, [string]$vm_id){
     If($? -ne $True){
         exit 1
     }
+
 }
 
 function hvcli-Get-VM-Status([string]$vm_name, [string]$vm_id){
@@ -121,4 +122,17 @@ function hvcli-Set-VM-Memory([string]$vm_name, [string]$vm_id){
     }
 }
 
+function hvcli-Rename-VM-([string]$vm_name, [string]$vm_id, [string]$newname){
+    If($vm_name){
+        $VM = Get-VM -Name "$vm_name"
+    }
+    Else
+    {
+        $VM = Get-VM -Id "$vm_id"
+    }
+    $VM | Rename-VM -NewName $newname
+    If($? -ne $True){
+        exit 1
+    }
+}
 # End of collection. DO NOT DELETE THE LINE BELOW
