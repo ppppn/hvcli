@@ -2,31 +2,8 @@
 
 from getpass import getpass, getuser
 import winrm
-from base64 import b64encode
 import fire
-import os
-
-class Session(winrm.Session):
-    def run_ps(self, script: str) -> winrm.Response: #override
-        """base64 encodes a Powershell script and executes the powershell
-        encoded script command.
-
-        """
-        # Suppress progress bar
-        script = "$ProgressPreference = 'SilentlyContinue';" + script
-        # must use utf16 little endian on windows
-        encoded_ps = b64encode(script.encode("utf_16_le")).decode("ascii")
-        rs = self.run_cmd("powershell -encodedcommand {0}".format(encoded_ps))
-        if len(rs.std_err):
-            # if there was an error message, clean it it up and make it human
-            # readable
-            rs.std_err = self._clean_error_msg(rs.std_err)
-        return rs
-
-def _print_result(response: winrm.Response):
-    print(response.std_out.decode('cp932'))
-    if response.status_code != 0:
-        print(response.std_err.decode('cp932'))
+import sys
 
 connection_info = {
     "user": "",
@@ -35,19 +12,24 @@ connection_info = {
     "auth_methods": [],
 }
 
+def _print_result(response: winrm.Response):
+    print(response.std_out.decode('utf-8'))
+    if response.status_code != 0:
+        sys.exit(response.std_err.decode('utf-8'))
+
 def _run_ps(script: str) -> winrm.Response:
     response = None
     for auth_method in connection_info["auth_methods"]:
-        print("Trying auth method: {}".format(auth_method))
-        session = Session(connection_info["computer"],
+        session = winrm.Session(connection_info["computer"],
                     auth=(connection_info["user"], connection_info["password"]),
                     transport=auth_method)
         try:
             response = session.run_ps(script)
+            break
         except Exception as e:
-            print("Failed.")
+            print(e.with_traceback())
     if response is None:
-        print("All specified authentication failed.")
+        print("All specified authentication method(s) failed.")
         exit(1)
     return response
 
@@ -57,7 +39,7 @@ def _acquire_password():
             connection_info["password"] = getpass("Authenticating as {user}: ".format(user=connection_info["user"]))
         except KeyboardInterrupt:
             print("Aborted.")
-            exit(1)
+            exit(130)
 
 class Cli(object):
 
@@ -73,19 +55,24 @@ class Cli(object):
 
 class Vm(object):
 
+    def __init__(self):
+        f = open('ps1/vm.ps1')
+        self.loaded_script = f.read()
+        f.close()
+
     def list_vms(self):
-        ps_script = '''$vms = @{};
-                       $vms.add("vms", $(Get-VM | Select Name, VMId));
-                       $vms | ConvertTo-Json'''
+        ps_script = self.loaded_script
+        ps_script += 'hvcli-List-VMs'
         _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
 
     def describe_vm(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
         if vm_name:
-            ps_script = '''Get-VM -Name "{vm_name}" | Select * | ConvertTo-Json'''.format(vm_name=vm_name)
+            ps_script += 'hvcli-Describe-VM -vm_name "{vm_name}"'.format(vm_name=vm_name)
         elif vm_id:
-            ps_script = '''Get-VM -Id "{vm_id}"| Select * | ConvertTo-Json'''.format(vm_id=vm_id)
+            ps_script += 'hvcli-Describe-VM -vm_id "{vm_id}"'.format(vm_id=vm_id)
         else:
             raise fire.core.FireError("Neither vm_name nor vm_id specified")
         _acquire_password()
@@ -93,10 +80,11 @@ class Vm(object):
         _print_result(ret)
 
     def stop_vm(self, vm_name=None, vm_id=None, force=False, skip_os_shutdown=False, save=False):
+        ps_script = self.loaded_script
         if vm_name:
-            ps_script = '''Stop-VM -Name "{vm_name}"'''.format(vm_name=vm_name)
+            ps_script += 'hvcli-Stop-VM -vm_name "{vm_name}"'.format(vm_name=vm_name)
         elif vm_id:
-            ps_script = '''Get-VM -Id "{vm_id}" | Stop-VM '''.format(vm_id=vm_id)
+            ps_script += 'hvcli-Stop-VM -vm_id "{vm_id}"'.format(vm_id=vm_id)
         else:
             raise fire.core.FireError("Neither vm_name nor vm_id specified")
         if sum(opt is not False for opt in [force, skip_os_shutdown, save]) > 1:
@@ -114,10 +102,48 @@ class Vm(object):
         _print_result(ret)
 
     def start_vm(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
         if vm_name:
-            ps_script = '''Start-VM -Name "{vm_name}"'''.format(vm_name=vm_name)
+            ps_script += 'hvcli-Start-VM -vm_name "{vm_name}"'.format(vm_name=vm_name)
         elif vm_id:
-            ps_script = '''Get-VM -Id "{vm_id}" | Start-VM '''.format(vm_id=vm_id)
+            ps_script += 'hvcli-Start-VM -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def restart_vm(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Restart-VM -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-Restart-VM -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        while True:
+            try:
+                input_txt = input('This command perform a "hard" reset. Proceed anyway?(y/N): ')
+            except KeyboardInterrupt:
+                print("Aborted.")
+                exit(130)
+            if input_txt in ("y", "Y"):
+                break
+            elif input_txt in ("n", "N", ""):
+                print("Aborted.")
+                exit(0)
+            else:
+                print("Please enter either 'y' or 'n'")
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def reboot_vm(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Reboot-VM -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-Reboot-VM -vm_id "{vm_id}"'.format(vm_id=vm_id)
         else:
             raise fire.core.FireError("Neither vm_name nor vm_id specified")
         _acquire_password()
@@ -125,22 +151,67 @@ class Vm(object):
         _print_result(ret)
 
     def get_vm_status(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
         if vm_name:
-            ps_script = '$ConvertStateToString=@{Label="StateName"; Expression={[String]$_.State}}; ' + \
-                        'Get-VM -Name "{vm_name}"'.format(vm_name=vm_name) + \
-                        '| Select VMName, VMId, State, $ConvertStateToString, PrimaryStatusDescription' + \
-                        '| ConvertTo-Json'
-
+            ps_script += 'hvcli-Get-VM-Status -vm_name "{vm_name}"'.format(vm_name=vm_name)
         elif vm_id:
-            ps_script = '$ConvertStateToString=@{Label="StateName"; Expression={[String]$_.State}}; ' + \
-                        'Get-VM -Id "{vm_id}"'.format(vm_id=vm_id) + \
-                        '| Select VMName, VMId, State, $ConvertStateToString, PrimaryStatusDescription' + \
-                        '| ConvertTo-Json'
+            ps_script += 'hvcli-Get-VM-Status -vm_id "{vm_id}"'.format(vm_id=vm_id)
         else:
             raise fire.core.FireError("Neither vm_name nor vm_id specified")
         _acquire_password()
         ret = _run_ps(ps_script)
         _print_result(ret)
+
+    def get_vm_memory(self, vm_name=None, vm_id=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Get-VM-Memory -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-Get-VM-Memory -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
+    def set_vm_memory(self, vm_name=None, vm_id=None,
+                      startup_bytes:int=None, minimum_bytes:int=None, maximum_bytes:int=None,
+                      enable_dynamic_memory:bool=None, disable_dynamic_memory:bool=None,
+                      buffer:int=None, priority:int=None):
+        ps_script = self.loaded_script
+        if vm_name:
+            ps_script += 'hvcli-Set-VM-Memory -vm_name "{vm_name}"'.format(vm_name=vm_name)
+        elif vm_id:
+            ps_script += 'hvcli-Set-VM-Memory -vm_id "{vm_id}"'.format(vm_id=vm_id)
+        else:
+            raise fire.core.FireError("Neither vm_name nor vm_id specified")
+
+        if sum(opt is not None for opt in [startup_bytes, minimum_bytes, maximum_bytes,
+                                           enable_dynamic_memory, disable_dynamic_memory, buffer, priority]) < 1:
+            sys.exit("No option is set.")
+
+        if enable_dynamic_memory and disable_dynamic_memory:
+            sys.exit("Either enable_dynamic_memory or disable_dynamic_memory can be set.")
+
+        if startup_bytes:
+            ps_script += ' -StartupBytes {}'.format(startup_bytes)
+        if minimum_bytes:
+            ps_script += ' -MinimumBytes {}'.format(minimum_bytes)
+        if maximum_bytes:
+            ps_script += ' -MaximumBytes {}'.format(maximum_bytes)
+        if enable_dynamic_memory:
+            ps_script += ' -EnableDynamicMemory $True'
+        if disable_dynamic_memory:
+            ps_script += ' -EnableDynamicMemory $False'
+        if buffer:
+            ps_script += ' -Buffer {}'.format(buffer)
+        if priority:
+            ps_script += ' -Priority {}'.format(priority)
+
+        _acquire_password()
+        ret = _run_ps(ps_script)
+        _print_result(ret)
+
 
 if __name__ == "__main__":
     fire.Fire(Cli)
